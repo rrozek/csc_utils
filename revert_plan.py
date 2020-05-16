@@ -192,8 +192,8 @@ def main():
                 json_file = json.load(file)
                 if 'TransactionType' in json_file['result']:
                     if json_file['result']['TransactionType'] == 'SetCRNRound':
-                        if json_file['result']['hash'] not in list_of_tx_to_revert:
-                            continue
+                        # if json_file['result']['hash'] not in list_of_tx_to_revert:
+                        #     continue
                         credited_nodes = {}
                         crns = json_file['result']['CRNs']
                         affected_nodes = json_file['result']['meta']['AffectedNodes']
@@ -222,12 +222,27 @@ def main():
                                 credited_nodes[modified_account_id]['reverts'] = json_file['result']['hash']
                                 credited_nodes[modified_account_id]['ledger_index'] = int(json_file['result']['ledger_index'])
                         content = {
+                            'crn_count': len(crns),
                             'hash': json_file['result']['hash'],
                             'ledger_index': int(json_file['result']['ledger_index']),
-                            'credited_nodes': credited_nodes
+                            'credited_nodes': credited_nodes,
+                            'valid': "True" if json_file['result']['hash'] != '921B11566B755273A2343E0F8E3EFDC41517E7B0960B2E81882AAEAEF03868E6' else "False"
                         }
 
                         json_combined['tx'].append(content)
+    # iterate through all crn rounds and in case of double tx, mark one (with bigger amount of crns) as VALID
+    seen_ledger_index = {}
+    for index, x in enumerate(json_combined['tx'], start=0):
+        if x['ledger_index'] not in seen_ledger_index:
+            seen_ledger_index[x['ledger_index']] = index
+        else:
+            if json_combined['tx'][seen_ledger_index[x['ledger_index']]]['crn_count'] >= x['crn_count']:
+                json_combined['tx'][seen_ledger_index[x['ledger_index']]]['valid'] = "True"
+                x['valid'] = "False"
+            else:
+                json_combined['tx'][seen_ledger_index[x['ledger_index']]]['valid'] = "False"
+                x['valid'] = "True"
+
     for filepath in os.listdir(the_path):
         filepath = os.path.join(the_path, filepath)
         if filepath.endswith(('.txt', '.log')):
@@ -241,8 +256,8 @@ def main():
                     for account in account_state:
                         if account['LedgerEntryType'] == 'AccountRoot':
                             if account['Account'] in affected_crn_account_ids:
-                                acc = {'Account': account['Account'], 'Balance': int(account['Balance'])}
-                                short_account_state.append(acc)
+                                issue_ledger_acc = {'Account': account['Account'], 'Balance': int(account['Balance'])}
+                                short_account_state.append(issue_ledger_acc)
                     content = {
                         'ledger_index': ledger_index,
                         'ledger_hash': ledger_hash,
@@ -253,8 +268,10 @@ def main():
     # at this point we have an array of accounts with the amounts which need to be burned with information which tx they cleanup.
     # we also have list of crn account ids affected and their state in ledger before/after the issue
     # now its time to check if claimed amounts will be inline with ledger data just before the faulty CRNRound and right after CRNRound
-    # pick CRNRound ledger index, get ledger before and after, substract amounts and compare with claim of Fee distribution
+    # pick CRNRound ledger index, get ledger before and after, substract balances and compare with claim of Fee distribution of double tx
     for tx in json_combined['tx']:
+        if tx['valid'] == 'True':
+            continue
         issue_ledger_index = tx['ledger_index']
         issue_ledger = {}
         before_ledger = {}
@@ -263,28 +280,45 @@ def main():
                 issue_ledger = ledger
             if ledger['ledger_index'] == issue_ledger_index - 1:
                 before_ledger = ledger
-        for acc in issue_ledger['affected_crn_accounts']:
-            if acc['Account'] not in tx['credited_nodes']:
+        for issue_ledger_acc in issue_ledger['affected_crn_accounts']:
+            if issue_ledger_acc['Account'] not in tx['credited_nodes']:
                 continue
-            tx_acc = tx['credited_nodes'][acc['Account']]
-            before_ledger_acc = next(filter(lambda x: x['Account'] == acc['Account'], before_ledger['affected_crn_accounts']))
+            tx_acc = tx['credited_nodes'][issue_ledger_acc['Account']]
+            before_ledger_acc = next(filter(lambda x: x['Account'] == issue_ledger_acc['Account'], before_ledger['affected_crn_accounts']))
             if tx_acc['status'] != 'ok':
                 print(f"ERROR crn account {tx_acc['Account']} status NOK. requires manual evaluation")
                 raise AssertionError
-            if acc['Balance'] != tx_acc['BalanceAfter'] or before_ledger_acc['Balance'] != tx_acc['BalanceBefore']:
-                print(f"ERROR crn account {tx_acc['Account']} balance check NOK. requires manual evaluation")
-                print(acc['Balance'])
-                print(tx_acc['BalanceAfter'])
-                print(before_ledger_acc['Balance'])
-                print(tx_acc['BalanceBefore'])
-                raise AssertionError
+
+            # this verifies that double spend actually happened on selected tx. if not - raise error
+            # so here, we expect that values stored in ledger before/ledger after are different then the info in tx, as this tx is faulty.
+            # we need to check if ledger_after.Balance - ledger_before.Balance - tx.distributed_amount == tx after
+            # that would confirm that reverting this tx is necessary
+            try:
+                if issue_ledger_acc['Balance'] - tx_acc['meta_fee_distributed'] == before_ledger_acc['Balance'] and before_ledger_acc['Balance'] == tx_acc['BalanceBefore']:
+                    print(f"WARNING: evaluated tx is not doublespending tx")
+                    raise AssertionError
+            except AssertionError:
+                # ok, at this point we know that the tx we mentioned is 'suspicious' but it was not doublespend.
+                # we have our fatal tx so lets check if that is the one  - if so, continue normally
+                if tx['hash'] != '921B11566B755273A2343E0F8E3EFDC41517E7B0960B2E81882AAEAEF03868E6':
+                    print(f"found invalid tx: {tx['hash']}")
+                    print(f"ERROR crn account {tx_acc['Account']} at between {before_ledger['ledger_index']}-{issue_ledger['ledger_index']} balance check NOK. requires manual evaluation")
+                    print(f"ledger balance after: {issue_ledger_acc['Balance']} "
+                          f"tx balance after: {tx_acc['BalanceAfter']} "
+                          f"ledger balance before: {before_ledger_acc['Balance']} "
+                          f"tx balance before: {tx_acc['BalanceBefore']} "
+                          f"claimed fee distributed: {tx_acc['meta_fee_distributed']}")
+                    raise AssertionError
             json_combined['todo'].append({
                 'Account': tx_acc['Account'],
-                'RevertAmount': tx_acc['meta_fee_distributed'] - 25000000,
+                'RevertAmount': tx_acc['meta_fee_distributed'],
                 'RelatedTx': tx['hash'],
                 'RelatedLedgerIndex': tx['ledger_index']
             })
-    print(f'{json_combined}')
+    result_filepath = os.path.join(os.curdir, 'result.json')
+    with open(result_filepath, 'w') as result_file:
+        json.dump(json_combined, result_file)
+        print(f'results stored in {os.path.abspath(result_filepath)}')
     return
 
 

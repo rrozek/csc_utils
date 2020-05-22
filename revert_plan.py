@@ -168,11 +168,14 @@ revert plan: pick all distributed amount in CRN tx:
 group by crn account id, burn total amount per account minus 25000000 (for the tx fee)
 '''
 def main():
+    whitelist_secret = ""
+    burn_forever_account = "cccccccccccccnqUHTrgbQAFboFNAw"
     the_path = os.path.curdir
     if len(sys.argv) > 1:
         if os.path.exists(sys.argv[1]):
             the_path = os.path.abspath(sys.argv[1])
-
+    if len(sys.argv) > 2:
+        whitelist_secret = sys.argv[2]
     if not os.path.isdir(the_path):
         print(f'please provide path to directory containing required full ledger dumps and crn tx info')
         return
@@ -183,6 +186,8 @@ def main():
         '19A9CDCD4640D67C7A3E420D0318DF10A9F9E7CFE7998B5B9514813E45A335B0',
         '921B11566B755273A2343E0F8E3EFDC41517E7B0960B2E81882AAEAEF03868E6'
     ]
+    with open(os.path.join(the_path, 'full_current.log')) as current_ledger:
+        current_ledger_json = json.load(current_ledger)
     json_combined = {'tx': [], 'ledger': [], 'todo': []}
     affected_crn_account_ids = []
     for filepath in os.listdir(the_path):
@@ -309,12 +314,53 @@ def main():
                           f"tx balance before: {tx_acc['BalanceBefore']} "
                           f"claimed fee distributed: {tx_acc['meta_fee_distributed']}")
                     raise AssertionError
+            sequence = 1
+
+            for account in current_ledger_json['result']['ledger']['accountState']:
+                if not 'Account' in account:
+                    continue
+                if account['Account'] == tx_acc['Account']:
+                    sequence = account['Sequence']
+                    break
+            prev_seq = sequence
+            sequence += sum(1 for entry in json_combined['todo'] if entry['Account'] == tx_acc['Account'])
+            if prev_seq != sequence:
+                print(f"sequence from {prev_seq} to {sequence} for acc: {tx_acc['Account']} in revert of {tx['hash']}")
+            memo_data = f"reverts invalid CRN tx {tx['hash']} from ledger {tx['ledger_index']}"
+            memo = {
+                'Memo': {
+                    "MemoData": memo_data.encode('utf-8').hex().upper(),
+                    "MemoType": 'info'.encode('utf-8').hex().upper(),
+                    "MemoFormat": 'plain/text'.encode('utf-8').hex().upper()
+                }
+            }
+            memos = [memo]
+            fee = 25000000
+            transaction = {
+                "TransactionType": "Payment",
+                "Account": tx_acc['Account'],
+                "Amount": str(tx_acc['meta_fee_distributed'] - fee),
+                "Destination": burn_forever_account,
+                "Fee": fee,
+                "Sequence": sequence,
+                "Memos": memos
+            }
             json_combined['todo'].append({
                 'Account': tx_acc['Account'],
-                'RevertAmount': tx_acc['meta_fee_distributed'],
+                'RevertAmount': tx_acc['meta_fee_distributed'] - 25000000,
                 'RelatedTx': tx['hash'],
-                'RelatedLedgerIndex': tx['ledger_index']
+                'RelatedLedgerIndex': tx['ledger_index'],
+                'Sequence': sequence,
+                'command': [
+                    "/usr/bin/casinocoind",
+                    "--conf=/etc/casinocoind/casinocoind.cfg",
+                    "sign",
+                    whitelist_secret,
+                    json.dumps(transaction),
+                    "offline"
+                ]
             })
+
     result_filepath = os.path.join(os.curdir, 'result.json')
     with open(result_filepath, 'w') as result_file:
         json.dump(json_combined, result_file)

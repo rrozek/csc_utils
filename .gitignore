@@ -119,4 +119,6 @@ wzywajposilki/media/*
 wzywajposilki/static/*
 .idea
 
-
+result.json
+after_revert_full_ledger.json
+execution_result.json

@@ -1,4 +1,5 @@
 import json
+import csv
 import sys
 import os
 from binascii import hexlify
@@ -162,7 +163,6 @@ def parse_dir(the_dir):
 ''' 
 revert plan: pick all distributed amount in CRN tx:
 2AEB85090BB24E75626049EA1967F00B3EB5BB79C2BA7FFA1EF7736A22EEA6B3
-22672AF79542518FEA90281A0DFD9215AC061EFC565293B980D59185A47224FD
 19A9CDCD4640D67C7A3E420D0318DF10A9F9E7CFE7998B5B9514813E45A335B0
 921B11566B755273A2343E0F8E3EFDC41517E7B0960B2E81882AAEAEF03868E6
 group by crn account id, burn total amount per account minus 25000000 (for the tx fee)
@@ -182,7 +182,6 @@ def main():
 
     list_of_tx_to_revert = [
         '2AEB85090BB24E75626049EA1967F00B3EB5BB79C2BA7FFA1EF7736A22EEA6B3',
-        '22672AF79542518FEA90281A0DFD9215AC061EFC565293B980D59185A47224FD',
         '19A9CDCD4640D67C7A3E420D0318DF10A9F9E7CFE7998B5B9514813E45A335B0',
         '921B11566B755273A2343E0F8E3EFDC41517E7B0960B2E81882AAEAEF03868E6'
     ]
@@ -345,13 +344,7 @@ def main():
                 "Sequence": sequence,
                 "Memos": memos
             }
-            json_combined['todo'].append({
-                'Account': tx_acc['Account'],
-                'RevertAmount': tx_acc['meta_fee_distributed'] - 25000000,
-                'RelatedTx': tx['hash'],
-                'RelatedLedgerIndex': tx['ledger_index'],
-                'Sequence': sequence,
-                'command': [
+            cmd = [
                     "/usr/bin/casinocoind",
                     "--conf=/etc/casinocoind/casinocoind.cfg",
                     "sign",
@@ -359,12 +352,34 @@ def main():
                     json.dumps(transaction),
                     "offline"
                 ]
+            json_combined['todo'].append({
+                'Account': tx_acc['Account'],
+                'RevertAmount': tx_acc['meta_fee_distributed'] - 25000000,
+                'RelatedTx': tx['hash'],
+                'RelatedLedgerIndex': tx['ledger_index'],
+                'Sequence': sequence,
+                'command': cmd,
+                'combined_cmd': ' '.join(str(e) for e in cmd)
             })
 
     result_filepath = os.path.join(os.curdir, 'result.json')
+    result_csv = os.path.join(os.curdir, 'result.csv')
     with open(result_filepath, 'w') as result_file:
         json.dump(json_combined, result_file)
         print(f'results stored in {os.path.abspath(result_filepath)}')
+    with open(result_csv, 'w', newline='') as result_csv_file_file:
+        result_csv_file = csv.writer(result_csv_file_file)
+        result_csv_file.writerow(['Account', 'RevertAmount', 'RelatedTx', 'RelatedLedgerIndex', 'combined_cmd'])
+        for single_entry in json_combined['todo']:
+            result_csv_file.writerow([
+                single_entry['Account'],
+                single_entry['RevertAmount'],
+                single_entry['RelatedTx'],
+                single_entry['RelatedLedgerIndex'],
+                single_entry['combined_cmd']
+            ])
+        print(f'results in csv stored in {os.path.abspath(result_csv)}')
+
     return
 
 
